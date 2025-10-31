@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  # PostgreSQL
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: judicial_user
+      POSTGRES_PASSWORD: judicial_pass
+      POSTGRES_DB: judicial_monitor
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judicial_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://judicial_user:judicial_pass@db:5432/judicial_monitor
+      DATABASE_URL_SYNC: postgresql://judicial_user:judicial_pass@db:5432/judicial_monitor
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      SECRET_KEY: change-me-in-production
+      DEBUG: "False"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../src:/app/src
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://judicial_user:judicial_pass@db:5432/judicial_monitor
+      DATABASE_URL_SYNC: postgresql://judicial_user:judicial_pass@db:5432/judicial_monitor
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      SECRET_KEY: change-me-in-production
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ../src:/app/src
+
+  # Celery Beat (scheduler)
+  beat:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://judicial_user:judicial_pass@db:5432/judicial_monitor
+      DATABASE_URL_SYNC: postgresql://judicial_user:judicial_pass@db:5432/judicial_monitor
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      SECRET_KEY: change-me-in-production
+    depends_on:
+      - db
+      - redis
+    command: celery -A src.workers.tasks beat --loglevel=info
+
+  # Flower (monitoramento Celery)
+  flower:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      - redis
+    command: celery -A src.workers.tasks flower --port=5555
+
+volumes:
+  postgres_data:
+
